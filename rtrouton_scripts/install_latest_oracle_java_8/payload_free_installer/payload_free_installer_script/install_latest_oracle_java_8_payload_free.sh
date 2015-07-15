@@ -33,11 +33,11 @@ fileURL=`/usr/bin/curl --silent $OracleUpdateXML | awk -F \" /enclosure/'{print 
 
 java_eight_dmg="$3/tmp/java_eight.dmg"
 
-if [[ ${osvers} -lt 8 ]]; then
-  echo "Oracle Java 8 is not available for Mac OS X 10.7.5 or below."
+if [[ ${osvers} -lt 7 ]]; then
+  echo "Oracle Java 8 is not available for Mac OS X 10.6.8 or earlier."
 fi
 
-if [[ ${osvers} -ge 8 ]]; then
+if [[ ${osvers} -ge 7 ]]; then
  
     # Download the latest Oracle Java 8 software disk image
     # The curl -L option is needed because there is a redirect 
@@ -53,9 +53,28 @@ if [[ ${osvers} -ge 8 ]]; then
  
     hdiutil attach "$java_eight_dmg" -mountpoint "$TMPMOUNT" -nobrowse -noverify -noautoopen
 
-    # Install Oracle Java 8 from the installer package stored inside the disk image
+    # Install Oracle Java 8 from the installer package. This installer may
+    # be stored inside an install application on the disk image, or there
+    # may be an installer package available at the root of the mounted disk
+    # image.
 
-    /usr/sbin/installer -dumplog -verbose -pkg "$(/usr/bin/find $TMPMOUNT -maxdepth 1 \( -iname \*\.pkg -o -iname \*\.mpkg \))" -target "$3"
+    if [[ -e "$(/usr/bin/find $TMPMOUNT -maxdepth 1 \( -iname \*\.app \))/Contents/Resources/*Java*.pkg" ]]; then    
+      pkg_path="$(/usr/bin/find $TMPMOUNT -maxdepth 1 \( -iname \*\.app \))/Contents/Resources/*Java*.pkg"
+    elif [[ -e "$(/usr/bin/find $TMPMOUNT -maxdepth 1 \( -iname \*Java*\.pkg -o -iname \*Java*\.mpkg \))" ]]; then    
+      pkg_path="$(/usr/bin/find $TMPMOUNT -maxdepth 1 \( -iname \*Java*\.pkg -o -iname \*Java*\.mpkg \))"
+    fi
+         
+    # Before installation, the installer's developer certificate is checked to
+    # see if it has been signed by Oracle's developer certificate. Once the 
+    # certificate check has been passed, the package is then installed.
+    
+    if [[ "${pkg_path}" != "" ]]; then
+        signature_check=`/usr/sbin/pkgutil --check-signature "$pkg_path" | awk /'Developer ID Installer/{ print $5 }'`
+           if [[ ${signature_check} = "Oracle" ]]; then
+             # Install Oracle Java 8 from the installer package stored inside the disk image
+             /usr/sbin/installer -dumplog -verbose -pkg "${pkg_path}" -target "$3"
+           fi
+    fi
 
     # Clean-up
  
