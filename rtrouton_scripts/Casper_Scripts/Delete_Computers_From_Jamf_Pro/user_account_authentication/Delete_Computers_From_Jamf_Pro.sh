@@ -1,18 +1,22 @@
 #!/bin/zsh --no-rcs
 
-# This script imports a list of serial numbers from a plaintext file 
+# This script imports a list of Jamf Pro ID numbers from a plaintext file 
 # and uses that information to generate a report about the matching computers
+# then deletes the specified computers from Jamf Pro.
 #
-# Usage: /path/to/Generate_Mac_Report_From_Jamf_Pro_Serial_Numbers.sh serial_numbers.txt
+# The script can also accept one Jamf Pro ID number as input, if a plaintext 
+# file containing Jamf Pro ID numbers is not available.
 #
-# Once the serial numbers are read from in from the plaintext file, the script takes the following actions:
+# Usage: /path/to/Delete_Computers_From_Jamf_Pro.sh jamf_pro_id_numbers.txt
+#
+# Once the Jamf Pro ID numbers are read from in from the plaintext file, the script takes the following actions:
 #
 # 1. Uses the Jamf Pro API to download all information about the matching computer inventory record in XML format.
 # 2. Pulls the following information out of the inventory entry:
 #
-#    Jamf Pro ID
 #    Manufacturer
 #    Model
+#    Serial Number
 #    Hardware UDID
 #
 # 3. Create a report in tab-separated value (.tsv) format which contains the following information
@@ -24,10 +28,40 @@
 #    Serial Number
 #    Hardware UDID
 #    Jamf Pro URL for the computer inventory record
+#
+# 4. Deletes the specified computers from Jamf Pro.
+#
+# If setting up a specific user account with limited rights, here are the required API privileges
+# for the account on the Jamf Pro server:
+#
+# Jamf Pro Server Objects:
+#
+# Computers: Read, Delete
 
 report_file="$(mktemp).tsv"
 filename="$1"
 ERROR=0
+
+# If a text file with Jamf Pro IDs has not been provided, the script
+# will prompt for a single Jamf Pro ID.
+
+if [[ -z "$filename" ]]; then
+     read "?Please enter the relevant Jamf Pro ID number : " jamfpro_id
+     
+     if [[ "$jamfpro_id" != <-> ]]; then
+        echo "Valid Jamf Pro ID number has not been entered. Script will exit."
+        ERROR=1
+        exit "$ERROR"
+     fi
+     
+     jamfpro_id_filename=$(mktemp)
+     /usr/bin/touch "$jamfpro_id_filename"
+     echo "$jamfpro_id" > "$jamfpro_id_filename"
+fi
+
+if [[ -z "$filename" ]] && [[ -r "$jamfpro_id_filename" ]]; then
+    filename="$jamfpro_id_filename"
+fi
 
 GetJamfProAPIToken() {
 
@@ -140,15 +174,15 @@ jamf_plist="$HOME/Library/Preferences/com.github.jamfpro-info.plist"
 if [[ -r "$jamf_plist" ]]; then
 
      if [[ -z "$jamfpro_url" ]]; then
-          jamfpro_url=$(defaults read "${jamf_plist%.*}" jamfpro_url)
+          jamfpro_url=$(defaults read "${jamf_plist%.*}" jamfpro_url 2>/dev/null)
      fi
 
      if [[ -z "$jamfpro_user" ]]; then
-          jamfpro_user=$(defaults read "${jamf_plist%.*}" jamfpro_user)
+          jamfpro_user=$(defaults read "${jamf_plist%.*}" jamfpro_user 2>/dev/null)
      fi
 
      if [[ -z "$jamfpro_password" ]]; then
-          jamfpro_password=$(defaults read "${jamf_plist%.*}" jamfpro_password)
+          jamfpro_password=$(defaults read "${jamf_plist%.*}" jamfpro_password 2>/dev/null)
      fi
 
 fi
@@ -174,6 +208,12 @@ echo ""
 
 jamfpro_url=${jamfpro_url%%/}
 
+# Set up the Jamf Pro Computer ID URL for reading computer information
+jamfproIDURL="${jamfpro_url}/api/v1/computers-inventory-detail"
+
+# Set up the Jamf Pro Computer ID URL for deleting computer information
+jamfproDeleteIDURL="${jamfpro_url}/api/v1/computers-inventory"
+
 GetJamfProAPIToken
 
 progress_indicator() {
@@ -189,7 +229,8 @@ progress_indicator() {
   done
 }
 
-echo "Report being generated. File location will appear below once ready."
+echo "Requested computers are being deleted from $jamfpro_url"
+echo "Report on deleted computers is being generated. File location will appear below once ready."
 
 progress_indicator &
 
@@ -197,19 +238,12 @@ SPIN_PID=$!
 
 trap "kill -9 $SPIN_PID" $(seq 0 15)
 
-while read -r SerialNumber; do
-
-			CheckAndRenewAPIToken		    
-
-			jamfproSerialURL="${jamfpro_url}/api/v1/computers-inventory?filter=hardware.serialNumber=="
-
-			ID=$(/usr/bin/curl -sf --header "Authorization: Bearer ${api_token}" "${jamfproSerialURL}${SerialNumber}" -H "Accept: application/json" | /usr/bin/plutil -extract results.0.id raw - 2>/dev/null)
-		    
-		    # Set up the Jamf Pro Computer ID URL
-		    jamfproIDURL="${jamfpro_url}/api/v1/computers-inventory-detail"
-		    
+while read -r ID; do
+			
+	if [[ "$ID" =~ ^[0-9]+$ ]]; then
+			CheckAndRenewAPIToken
 		    ComputerRecord=$(/usr/bin/curl -sf --header "Authorization: Bearer ${api_token}" "${jamfproIDURL}/$ID" -H "Accept: application/json" 2>/dev/null)
-
+		    
 			if [[ ! -f "$report_file" ]]; then
 				touch "$report_file"
 				printf "Jamf Pro ID Number\tMake\tModel\tSerial Number\tUDID\tJamf Pro URL\n" > "$report_file"
@@ -218,22 +252,34 @@ while read -r SerialNumber; do
 			Make=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract hardware.make raw - 2>/dev/null)
 			MachineModel=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract hardware.model raw - 2>/dev/null)
 			SerialNumber=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract hardware.serialNumber raw - 2>/dev/null)
-			JamfProID=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract id raw - 2>/dev/null)
 			UDIDIdentifier=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract udid raw - 2>/dev/null)						
 			JamfProURL=$(printf "$jamfpro_url/computers.html?id=$ID")
 			
 			if [[ $? -eq 0 ]]; then
-				printf "$JamfProID\t$Make\t$MachineModel\t$SerialNumber\t$UDIDIdentifier\t${JamfProURL}\n" >> "$report_file"
+				printf "$ID\t$Make\t$MachineModel\t$SerialNumber\t$UDIDIdentifier\t${JamfProURL}\n" >> "$report_file"
 			else
-				echo "ERROR! Failed to read computer record with serial number $SerialNumber"
+				echo "ERROR! Failed to read computer record with id $ID"
 			fi
+			
+			# The line below previews the results of the 
+			# deletion command. Comment out the line below
+			# if this preview is not desired.
+			
+			echo "curl -X DELETE ${jamfproDeleteIDURL}/$ID"
+			
+			# The lines below runs the deletion command.
+			# Comment out the lines below if you want to
+			# only simulate running the deletion command.
+			
+			/usr/bin/curl --header "Authorization: Bearer ${api_token}" -X DELETE "${jamfproDeleteIDURL}/$ID"
+	fi
 				
 done < "$filename"
 
 kill -9 "$SPIN_PID"
 			
 if [[ -f "$report_file" ]]; then
-     echo "Report on Macs available here: $report_file"
+     echo "Report on deleted Macs available here: $report_file"
 fi
 
 else

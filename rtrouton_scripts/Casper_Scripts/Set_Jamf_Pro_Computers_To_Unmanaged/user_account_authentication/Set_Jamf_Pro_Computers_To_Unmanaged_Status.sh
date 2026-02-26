@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # This script imports a list of Jamf Pro ID numbers from a plaintext file 
-# and uses that information to set the computers' management status to Managed.
+# and uses that information to set the computers' management status to Unmanaged.
 #
-# Usage: /path/to/Set_Jamf_Pro_Computers_To_Managed_Status.sh jamf_pro_id_numbers.txt
+# Usage: /path/to/Set_Jamf_Pro_Computers_To_Unmanaged_Status.sh jamf_pro_id_numbers.txt
 #
 # Once the Jamf Pro ID numbers are read from in from the plaintext file, the script takes the following actions:
 #
@@ -19,7 +19,7 @@
 #    Hardware UDID
 #    Management status
 #
-# 3. If the management status is set to "Unmanaged", runs a separate API call to set the management status in the computer inventory record to "Managed".
+# 3. If the management status is set to "Managed", runs a separate API call to set the management status in the computer inventory record to "Unmanaged".
 #
 # 4. Create a report in tab-separated value (.tsv) format which contains the following information
 #    about the relevant Macs
@@ -97,20 +97,22 @@ else
 fi
 }
 
-ComputerInventoryRecordManagementCheck() {
+ComputerInventoryRecordManagementUpdateToUnmanaged() {
 
-# Check if the computer inventory record is set to managed or unmanaged.
+# Set computer inventory record to unmanaged.
 
-management_status_check=$(/usr/bin/curl --silent -H "Accept: application/xml" "${jamfpro_url}/JSSResource/computers/id/$ID" --request GET --header "Authorization: Bearer ${api_token}" | xmllint --xpath '//computer/general/remote_management/managed/text()' - 2>/dev/null)
+managementStatus="false"
 
-}
+# Format a block of JSON and use %s to specify where printf should print a specified variable.
+JSONBlockFormat='{"general":{"managed":"%s"}}'
 
-ComputerInventoryRecordManagementUpdateToManaged() {
+# Use printf to create the needed JSON block and write the managementStatus variable in the correct place in the JSON block.
+JSONBlock=$(printf "$JSONBlockFormat" "$managementStatus")
+		
+# Send an API command to update the computer inventory record with the specified management setting and read back the HTTP response code.
+apiResponse=$(/usr/bin/curl -s -o /dev/null --header "Authorization: Bearer ${api_token}" "${jamfproIDURL}/$ID" -w "%{http_code}" -H "Content-Type: application/json" -X PATCH -d "$JSONBlock")
 
-# Set computer inventory record to managed.
-
-/usr/bin/curl --fail --silent -H "content-type: text/xml" "${jamfpro_url}/JSSResource/computers/id/$ID" --header "Authorization: Bearer ${api_token}" -X PUT -d "<computer><general><remote_management><managed>true</managed></remote_management></general></computer>"
-
+responseCode=$(echo "$apiResponse")
 }
 
 # If you choose to hardcode API information into the script, set one or more of the following values:
@@ -185,6 +187,9 @@ filename="$1"
 # Remove the trailing slash from the Jamf Pro URL if needed.
 jamfpro_url=${jamfpro_url%%/}
 
+# Set up the Jamf Pro Computer ID URL
+jamfproIDURL="${jamfpro_url}/api/v3/computers-inventory-detail"
+
 # Get Jamf Pro API bearer token
 
 GetJamfProAPIToken
@@ -215,41 +220,51 @@ while read -r ID; do
 			
 	if [[ "$ID" =~ ^[0-9]+$ ]]; then
             CheckAndRenewAPIToken
+            
+            # Set the expected HTTP response code for a successful API call to update the management setting information.
+            APISuccess="204"
 
-            ComputerRecord=$(/usr/bin/curl -sf --header "Authorization: Bearer ${api_token}" "${jamfpro_url}/JSSResource/computers/id/$ID" -H "Accept: application/xml" 2>/dev/null)
+            ComputerRecord=$(/usr/bin/curl -sf --header "Authorization: Bearer ${api_token}" "${jamfproIDURL}/$ID" -H "Accept: application/json" 2>/dev/null)
 
             if [[ ! -f "$report_file" ]]; then
                 touch "$report_file"
                 printf "Jamf Pro ID Number\tMake\tModel\tSerial Number\tUDID\tComputer Management Status\tJamf Pro URL\n" > "$report_file"
             fi
 
-            ComputerInventoryRecordManagementCheck
+            management_status_check=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract general.remoteManagement.managed raw - 2>/dev/null)
             
-            if [[ ${management_status_check} = "true" ]]; then
+            if [[ ${management_status_check} = "false" ]]; then
                    echo ""
-                   echo "Management status in the computer inventory record for $jamfpro_url/computers.html?id=$ID is currently set to managed."
-                   echo ""
-                   management_status_output="Managed"
-            elif [[ ${management_status_check} = "false" ]]; then
-                ComputerInventoryRecordManagementUpdateToManaged
-                if [[ $? -eq 0 ]]; then
-                   echo ""
-                   echo "Updated management status in the computer inventory record for $jamfpro_url/computers.html?id=$ID from unmanaged to managed."
-                   echo ""
-                   management_status_output="Managed"
-                else
-                   echo ""
-                   echo "ERROR! Management status in the computer inventory record for $jamfpro_url/computers.html?id=$ID is unmanaged."
+                   echo "Management status in the computer inventory record for $jamfpro_url/computers.html?id=$ID is currently set to unmanaged."
                    echo ""
                    management_status_output="Unmanaged"
+            elif [[ ${management_status_check} = "true" ]]; then
+
+                ComputerInventoryRecordManagementUpdateToUnmanaged
+
+                # If the API call returns an HTTP response which matches the APISuccess variable, the API call succeeded and the management setting information
+                # should be updated in the computer inventory record. Script reports a successful update.
+                # 
+                # If the HTTP response code does not match the APISuccess variable, script report a failed update to the management setting information.
+
+                if [[ "$responseCode" == "$APISuccess" ]]; then
+                   echo ""
+                   echo "Updated management status in the computer inventory record for $jamfpro_url/computers.html?id=$ID from managed to unmanaged."
+                   echo ""
+                   management_status_output="Unmanaged"
+                else
+                   echo ""
+                   echo "ERROR! Management status in the computer inventory record for $jamfpro_url/computers.html?id=$ID is managed."
+                   echo ""
+                   management_status_output="Managed"
                 fi
             fi
            
-            Make=$(echo "$ComputerRecord" | xmllint --xpath '//computer/hardware/make/text()' - 2>/dev/null)
-            MachineModel=$(echo "$ComputerRecord" | xmllint --xpath '//computer/hardware/model/text()' - 2>/dev/null)
-            SerialNumber=$(echo "$ComputerRecord" | xmllint --xpath '//computer/general/serial_number/text()' - 2>/dev/null)
-            UDIDIdentifier=$(echo "$ComputerRecord" | xmllint --xpath '//computer/general/udid/text()' - 2>/dev/null)						
-            JamfProURL=$(echo "$jamfpro_url"/computers.html?id="$ID")
+            Make=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract hardware.make raw - 2>/dev/null)
+            MachineModel=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract hardware.model raw - 2>/dev/null)
+            SerialNumber=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract hardware.serialNumber raw - 2>/dev/null)
+            UDIDIdentifier=$(printf '%s' "$ComputerRecord" | /usr/bin/plutil -extract udid raw - 2>/dev/null)						
+            JamfProURL=$(printf "$jamfpro_url/computers.html?id=$ID")
 			
             if [[ $? -eq 0 ]]; then
                 printf "$ID\t$Make\t$MachineModel\t$SerialNumber\t$UDIDIdentifier\t${management_status_output}\t${JamfProURL}\n" >> "$report_file"
